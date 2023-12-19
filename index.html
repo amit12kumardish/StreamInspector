@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON Payload Viewer</title>
+</head>
+<body>
+
+    <center><label margin: auto><H2>SMARTBOX STREAM INSPECTOR</label></body><H2></label></H2></center>
+    <hr>
+    <!-- UI : epg-api input & fetch-button.  -->
+    <label for="urlInput">SMARTBOX-EPG-URL:</label>
+    <input type="text" size="65" value="https://streaming0.watchdishtv.com/serviceepginterface/serviceepgdata" id="urlInput" placeholder="Enter URL">
+    <button onclick="fetchAndDisplay()">Fetch and Display</button>
+    <br>
+    <label for="channelDetailsLabel">CHANNELS_INFO:</label>
+    <br>
+    <textarea id="channelDetailsTextArea" rows="5" cols="150" readonly></textarea>
+    <hr>
+    <label for="urlInput">CONTINIOUS-CHECK:</label>
+    <button onclick="startCS()">START</button>
+    <button onclick="stopCS()">STOP</button>
+    <button onclick="downloadLogs()">DOWNLOAD</button>
+    <hr>
+     <!-- UI : OUTPUT (COLLECTIVE) -->
+     <textarea id="outputTextArea" rows="25" cols="150" readonly></textarea>
+     <hr>
+    <!-- UI : OUTPUT (NOW) -->
+    <label>OUTPUT (NOW)</label>
+    <br>
+    <table border="1" id="resultTable">
+        <thead>
+            <tr>
+                <th>Service Name</th> <!--0-->
+                <th>service Key</th> <!--1-->
+                <th>MPD-AST</th> <!--2-->
+                <th>MPD-PubT</th> <!--3-->
+                <th>relative PubT(PubT - AST)</th> <!--4-->
+                <th>first-segment Segment-T</th> <!--5-->
+                <th>Segment-Late-By-seconds: (first-segment Segment-T) - (rel PubT)</th> <!--6-->
+            </tr>
+        </thead>
+        <tbody id="resultBody">
+            <!-- Table body will be populated dynamically -->
+        </tbody>
+    </table>
+    <hr>
+    <!-- SCRIPT -->
+    <script>
+        //Global config param
+        //
+        intervalForContiniousRunsMS = (1 * 30 * 1000) //MM*SS*MILS
+        continiousRunCounter = 0
+
+        //Methdods to write into channel-details text box.
+        //
+        //
+        function clearChannelDetailsLog() {
+            const channelDetailsTextArea = document.getElementById('channelDetailsTextArea');
+            channelDetailsTextArea.value = ""
+        }
+        function logChannelDetails(detailStringIn) {
+            const channelDetailsTextArea = document.getElementById('channelDetailsTextArea');
+            channelDetailsTextArea.value += detailStringIn + "\n"
+        }
+
+        //Methods to write into collective-output text box.
+        //
+        //
+        function clearOutputTextArea() {
+            const outputTextArea = document.getElementById('outputTextArea');
+            outputTextArea.value = ""
+            clearLocalLog()
+        }
+        function LogOutput(outputStringIn) {
+            const outputTextArea = document.getElementById('outputTextArea');
+            outputTextArea.value += outputStringIn
+            writeToLocal(outputStringIn)
+        }
+
+        //Methods : fetchAndDisplay() : that fetches an parses the EPG data.
+        //
+        //
+        function fetchAndDisplay() {
+            // Get the input URL
+            const urlInput = document.getElementById('urlInput');
+            const url = urlInput.value;
+            clearChannelDetailsLog()
+
+            // Make a fetch request to the URL
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    // Get the services array from the JSON payload
+                    const services = data.services;
+
+                    // Get the table body element
+                    const resultBody = document.getElementById('resultBody');
+
+                    // Clear existing rows in the table
+                    resultBody.innerHTML = "";
+
+                    // Iterate through each service and add a row to the table
+                    services.forEach(service => {
+                        const row = resultBody.insertRow();
+                        
+                        // Display serviceName in the first column
+                        const serviceNameCell = row.insertCell(0);
+                        serviceNameCell.textContent = service.serviceName;
+
+                         // Display serviceName in the first column
+                        const serviceKeyCell = row.insertCell(1);
+                        serviceKeyCell.textContent = service.serviceKey;
+
+                        // Display the serviceUrlDASH in the textarea
+                        logChannelDetails(service.serviceName + " /" + service.serviceKey + " /" + service.serviceUrlDASH)
+
+                        // Fetch the DASH-MPD payload from serviceUrlDASH
+                        const dashUrl = service.serviceUrlDASH;
+                        fetch(dashUrl)
+                            .then(response => {
+                                if (!response.ok) {
+                                    throw new Error(`Error fetching DASH-MPD from ${dashUrl}: ${response.status} ${response.statusText}`);
+                                }
+                                return response.text(); // Use text() for XML content
+                            })
+                            .then(dashData => {
+                                // Process the DASH-MPD XML data as needed
+                                const parser = new DOMParser();
+                                const xmlDoc = parser.parseFromString(dashData, "text/xml");
+
+                                // Example: Get availabilityStartTime attribute from the MPD element
+                                const mpdElement = xmlDoc.querySelector('MPD');
+                                const availabilityStartTime = mpdElement.getAttribute('availabilityStartTime');
+                                const publishTime = mpdElement.getAttribute('publishTime');
+                                const astDateTS = Date.parse(availabilityStartTime)
+                                const astSeconds = astDateTS/1000
+                                const pubTDateTS = Date.parse(publishTime)
+                                const pubTSeconds = pubTDateTS/1000
+                                relPubTSeconds = 0
+                                
+                                // Display availabilityStartTime in the second column
+                                const availabilityStartTimeCell = row.insertCell(2);
+                                availabilityStartTimeCell.textContent = availabilityStartTime ? availabilityStartTime : "N/A";
+                                availabilityStartTimeCell.textContent += " or "+String(astSeconds)+"s"
+
+                                // Display availabilityStartTime in the second column
+                                const publishTimeCell = row.insertCell(3);
+                                publishTimeCell.textContent = publishTime ? publishTime : "N/A";
+                                publishTimeCell.textContent += " or "+String(pubTSeconds)+"s"
+
+                                 // Display availabilityStartTime in the second column
+                                const relativePubTimeCell = row.insertCell(4);
+                                relPubTSeconds = (pubTSeconds - astSeconds)
+                                relativePubTimeCell.textContent = String(relPubTSeconds)+ "s"
+
+                                // Find the smallest 't' value across all segment-timelines, representations, and adaptation-sets
+                                const earliestSegmentTime = findSmallestTValue(xmlDoc);
+                                earliestSegmentTimeSeconds = 0
+                                
+                                // Display smallest 't' value in the third column
+                                const smallestTValueCell = row.insertCell(5);
+                                if(earliestSegmentTime === Infinity) {
+                                    earliestSegmentTime = "N/A";
+                                } else{
+                                    smallestTValueCell.textContent = earliestSegmentTime
+                                    smallestTValueCell.textContent += " or "
+                                    smallestTValueCell.textContent += Math.round((earliestSegmentTime/90000))
+                                    smallestTValueCell.textContent += "s"
+                                    earliestSegmentTimeSeconds = Math.round((earliestSegmentTime/90000))
+                                }
+
+
+                                const segmentLateBySeconds = row.insertCell(6);
+                                lateBySecondsInt = earliestSegmentTimeSeconds - relPubTSeconds
+                                //SIM-BEGIN
+                                //if(service.serviceName == "AMC") {
+                                //    lateBySecondsInt = 4500 + lateBySecondsInt
+                                //}
+                                //SIM-END
+                                segmentLateBySeconds.textContent = String(lateBySecondsInt)+ "s"
+                                if(lateBySecondsInt > 300) {
+                                    segmentLateBySeconds.style.backgroundColor = "red"
+                                    LogOutput("ERR!-SegmentLate-"+lateBySecondsInt+"s@"+service.serviceName+",")
+                                } else if(lateBySecondsInt > 0) {
+                                    LogOutput("WARN-SegmentLate-"+lateBySecondsInt+"s@"+service.serviceName+",")
+                                    segmentLateBySeconds.style.backgroundColor = "yellow"
+                                } 
+                            })
+                            .catch(error => {
+                                console.error(`Error processing ${dashUrl}: ${error.message}`);
+                                // Display an error message in the third column if fetching fails
+                                const smallestTValueCell = row.insertCell(6);
+                                smallestTValueCell.textContent = "Error fetching or processing DASH-MPD";
+                            });
+                    });
+                })
+                .catch(error => {
+                    console.error(`Error fetching JSON from ${url}: ${error.message}`);
+                });
+        }
+
+        function findSmallestTValue(xmlDoc) {
+            console.log('findSmallestTValue() +++++ +++++ +++++ +++++ +++++ ')
+            let smallestTValue = Infinity;
+
+            const periods = xmlDoc.querySelectorAll('Period');
+            periods.forEach(period => {
+                console.log('PER|')
+                // Iterate through each representation
+                const adaptationSets = period.parentElement.querySelectorAll('AdaptationSet');
+                    adaptationSets.forEach(adaptationSet => {
+                        console.log('ADS>')
+                    // Iterate through each adaptation-set
+                    const representations = adaptationSet.parentElement.querySelectorAll('Representation');
+                        representations.forEach(representation => {
+                            console.log('REP>>')
+                        // Iterate through each segment-timeline
+                        const segmentTimelines = representation.querySelectorAll('SegmentTimeline');
+                        segmentTimelines.forEach(segmentTimeline => {
+                            console.log('SET>>')
+                            // Iterate through each segment
+                            const segments = segmentTimeline.querySelectorAll('S');
+                            segments.forEach(segment => {
+                                const TSTP = segment.getAttribute('t')
+                                console.log('SEG>>> T='+ TSTP)
+                                // Get the 't' attribute value
+                                const tValue = parseInt(TSTP);
+                                if (!isNaN(tValue) && tValue < smallestTValue) {
+                                    smallestTValue = tValue;
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+            console.log('findSmallestTValue() ----- ----- ----- ----- ----- :'+String(smallestTValue))
+            return smallestTValue;
+        }
+
+        //Methods : Continious inspect
+        //
+        //
+        var continousEPGTimer = null
+        function startCS() {
+            //Deinit.
+            clearOutputTextArea()
+            stopCS()
+
+            //Start.
+            LogOutput("continious inspection: BEGIN."+"\n");
+            continousEPGTimer = setInterval(onContiniousEPGTimer, intervalForContiniousRunsMS);
+            onContiniousEPGTimer()
+        }
+        function stopCS() {
+            continiousRunCounter = 0
+            if(null != continousEPGTimer) {
+                clearInterval(continousEPGTimer)
+                continousEPGTimer = null
+            }
+            LogOutput("\n")
+            LogOutput("continious inspection: END."+"\n");
+        }
+        function downloadLogs() {
+
+        }
+        function onContiniousEPGTimer() {
+            var dateNow = new Date();
+            dateStr = dateNow.toLocaleString();
+            fetchAndDisplay();
+            LogOutput("\n")
+            LogOutput("run#"+continiousRunCounter+" : "+dateStr + " : ");
+            continiousRunCounter++;
+        }
+
+
+        //Data Management.
+        //
+        //
+        function writeToLocal(stringToWrite) {
+
+            // Retrieve existing content from local storage
+            let existingContent = localStorage.getItem('SBXInspectorLocalData') || '';
+            // Append new content
+            existingContent += stringToWrite;
+            // Save updated content to local storage
+            localStorage.setItem('SBXInspectorLocalData', existingContent);
+
+        }
+        function clearLocalLog() {
+            localStorage.setItem('SBXInspectorLocalData', "");
+        }
+
+        //Collect log.
+        //
+        //
+        function downloadLogs() {
+            let existingContent = localStorage.getItem('SBXInspectorLocalData') || '';
+            writeToFile(existingContent)
+        }
+        function writeToFile(content) {
+    
+            // Check if there's data in local storage
+            if (!content) {
+                alert('No data in local storage. Write to local storage first.');
+                return;
+            }
+
+            // Create a Blob containing the text
+            const blob = new Blob([content], { type: 'text/plain' });
+
+            // Create a link element
+            const link = document.createElement('a');
+
+            // Set the download attribute with the file name
+            link.download = 'sbxStrmInspContiniousLog.txt';
+
+            // Create a URL for the Blob and set it as the href attribute of the link
+            link.href = window.URL.createObjectURL(blob);
+
+            // Append the link to the document
+            document.body.appendChild(link);
+
+            // Trigger a click event on the link to prompt the download
+            link.click();
+
+            // Remove the link from the document
+            document.body.removeChild(link);
+        }
+
+    </script>
+</body>
+</html>
